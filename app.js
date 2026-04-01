@@ -1484,9 +1484,26 @@ function App() {
   const isOwner = auth === "owner";
   const TABS    = ["Dashboard", "Log Food", "Schedule", isOwner ? "AI Coach" : "Daily Tips"];
 
-  // Load persisted state on mount
+  // Load persisted state on mount — try Render/JSONBin first, fall back to localStorage
   useEffect(() => {
     (async () => {
+      try {
+        // Try cloud first
+        const r = await fetch(PROXY_URL + "/api/data");
+        if (r.ok) {
+          const d = await r.json();
+          if (d.pr)   setPr(d.pr);
+          if (d.sc)   setSc({ ...DSCHED, ...d.sc });
+          if (d.logs) setLogs(d.logs);
+          if (d.wlog) setWlog(d.wlog);
+          if (d.lang) setLang(d.lang);
+          if (d.fs)   setFs(d.fs);
+          setLoaded(true);
+          return;
+        }
+      } catch (e) { /* Render asleep or offline — fall through to localStorage */ }
+
+      // Fallback: localStorage
       try {
         const r = await window.storage.get(STORAGE_KEY);
         if (r) {
@@ -1498,19 +1515,29 @@ function App() {
           if (d.lang) setLang(d.lang);
           if (d.fs)   setFs(d.fs);
         }
-      } catch (e) { /* first run — nothing to restore */ }
+      } catch (e) { /* first run */ }
       setLoaded(true);
     })();
   }, []);
 
   async function save(p, s, l, w, lg, f) {
+    const payload = { pr: p, sc: s, logs: l, wlog: w, lang: lg, fs: f };
+    // Always save to localStorage immediately (instant, no network needed)
     try {
-      await window.storage.set(STORAGE_KEY, JSON.stringify({ pr: p, sc: s, logs: l, wlog: w, lang: lg, fs: f }));
-      setSaveStatus("saved");
-      setTimeout(() => setSaveStatus(""), 2000);
+      await window.storage.set(STORAGE_KEY, JSON.stringify(payload));
+    } catch (e) { /* ignore */ }
+    // Also save to cloud in background
+    try {
+      const r = await fetch(PROXY_URL + "/api/data", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify(payload),
+      });
+      setSaveStatus(r.ok ? "saved" : "err");
     } catch (e) {
       setSaveStatus("err");
     }
+    setTimeout(() => setSaveStatus(""), 2000);
   }
 
   const upPr  = (k, v) => { const p = { ...pr,  [k]: v };              setPr(p);  save(p, sc, logs, wlog, lang, fs); };
