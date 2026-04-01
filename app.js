@@ -22,7 +22,7 @@ const { useState, useEffect, useRef } = React;
 // ─── Backend proxy URL ────────────────────────────────────────────
 // Point this at your Render service once deployed.
 // Leave as "" to show the AI UI in disabled/greyed state.
-const PROXY_URL = "";
+const PROXY_URL = "https://nutrition-tracker-vm1g.onrender.com";
 
 // ─── PcScreen ─────────────────────────────────────────────────────
 // Passcode gate shown before the app loads.
