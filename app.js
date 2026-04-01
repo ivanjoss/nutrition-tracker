@@ -19,6 +19,11 @@
 
 const { useState, useEffect, useRef } = React;
 
+// ─── Backend proxy URL ────────────────────────────────────────────
+// Point this at your Render service once deployed.
+// Leave as "" to show the AI UI in disabled/greyed state.
+const PROXY_URL = "";
+
 // ─── PcScreen ─────────────────────────────────────────────────────
 // Passcode gate shown before the app loads.
 // Props: onUnlock, onGuest, t, F
@@ -545,6 +550,403 @@ function LFShell({ logs, upLog, base, sc, t, F, children }) {
   );
 }
 
+// ─── OwnerLogFood ─────────────────────────────────────────────────
+// Owner-only Log Food tab: AI section (text + photo → macro JSON via
+// Render proxy) stacked above the standard DB search + manual entry.
+// Props: logs, upLog, base, sc, t, F, lang
+function OwnerLogFood({ logs, upLog, base, sc, t, F, lang }) {
+  // ── AI section state ──
+  const [meal,    setMeal]    = useState("breakfast");
+  const [inp,     setInp]     = useState("");
+  const [img,     setImg]     = useState(null);   // { data, type, preview }
+  const [loading, setLoading] = useState(false);
+  const [err,     setErr]     = useState("");
+  const fRef = useRef();
+
+  // ── DB section state (mirrors LogFood) ──
+  const [q,     setQ]     = useState("");
+  const [res,   setRes]   = useState([]);
+  const [sel,   setSel]   = useState(null);
+  const [srv,   setSrv]   = useState(1);
+  const [cook,  setCook]  = useState("raw");
+  const [showM, setShowM] = useState(false);
+  const [man,   setMan]   = useState({ name: "", cal: "", prot: "", carb: "", fat: "" });
+
+  const isRaw   = sel && RAW_TYPES.includes(sel.t);
+  const cookAdj = COOKING.adj[cook] || { cal: 0, fat: 0 };
+  const adjCal  = isRaw ? sel.cal + cookAdj.cal : sel ? sel.cal : 0;
+  const adjFat  = isRaw ? sel.f   + cookAdj.fat : sel ? sel.f   : 0;
+
+  const ready = !!PROXY_URL;   // false → greyed-out AI button
+
+  const MEAL_COLORS = [M.clay, M.sage, M.lavender, M.blush];
+  const MKEYS_LOCAL = ["breakfast", "lunch", "dinner", "snacks"];
+
+  // Live DB search
+  useEffect(() => {
+    if (!q.trim()) { setRes([]); return; }
+    const qq = q.toLowerCase().trim();
+    setRes(DB.filter(f => f.n.toLowerCase().includes(qq) || (f.z && f.z.includes(qq))).slice(0, 8));
+    setSel(null);
+  }, [q]);
+
+  // ── AI analyze ───────────────────────────────────────────────────
+  async function analyze(selDate) {
+    if (!inp.trim() && !img) return;
+    setLoading(true); setErr("");
+    try {
+      const body = { description: inp.trim() };
+      if (img) { body.imageData = img.data; body.imageType = img.type; }
+
+      const fetchPromise   = fetch(PROXY_URL + "/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("TIMEOUT")), 15000)
+      );
+
+      const r = await Promise.race([fetchPromise, timeoutPromise]);
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        throw new Error(e.error || "Server error " + r.status);
+      }
+      const items = await r.json();
+      upLog(selDate, day => ({
+        ...day,
+        meals: { ...day.meals, [meal]: [...(day.meals[meal] || []), ...items] },
+      }));
+      setInp(""); setImg(null);
+    } catch (e) {
+      setErr(e.message === "TIMEOUT"
+        ? "Timed out — please try again."
+        : "Error: " + e.message);
+    }
+    setLoading(false);
+  }
+
+  async function handleFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const r = new FileReader();
+    r.onload = ev => setImg({ data: ev.target.result.split(",")[1], type: file.type, preview: ev.target.result });
+    r.readAsDataURL(file);
+    e.target.value = "";
+  }
+
+  // ── DB helpers (same logic as LogFood) ───────────────────────────
+  function addSel(selDate) {
+    if (!sel) return;
+    const finalCal  = Math.round(adjCal * srv);
+    const finalFat  = Math.max(0, Math.round(adjFat * srv));
+    const cookIdx   = COOKING.keys.indexOf(cook);
+    const cookLabel = isRaw && cook !== "raw"
+      ? (lang === "zh" ? COOKING.zh[cookIdx] : COOKING.en[cookIdx]) : "";
+    const name = sel.n + (cookLabel ? ` (${cookLabel})` : "") + (srv !== 1 ? ` ×${srv}` : "");
+    upLog(selDate, day => ({
+      ...day,
+      meals: {
+        ...day.meals,
+        [meal]: [...(day.meals[meal] || []), {
+          name, cal: finalCal,
+          prot: Math.round(sel.p * srv),
+          carb: Math.round(sel.c * srv),
+          fat:  finalFat,
+        }],
+      },
+    }));
+    setSel(null); setQ(""); setRes([]); setCook("raw");
+  }
+
+  function addMan(selDate) {
+    if (!man.name || !man.cal) return;
+    upLog(selDate, day => ({
+      ...day,
+      meals: {
+        ...day.meals,
+        [meal]: [...(day.meals[meal] || []), {
+          name: man.name,
+          cal:  parseFloat(man.cal)  || 0,
+          prot: parseFloat(man.prot) || 0,
+          carb: parseFloat(man.carb) || 0,
+          fat:  parseFloat(man.fat)  || 0,
+        }],
+      },
+    }));
+    setMan({ name: "", cal: "", prot: "", carb: "", fat: "" });
+    setShowM(false);
+  }
+
+  return h(LFShell, { logs, upLog, base, sc, t, F },
+    (selDate, MKEYS, MLABS) => h("div", { style: { display: "flex", flexDirection: "column", gap: 12 } },
+
+      // ── AI card ─────────────────────────────────────────────────
+      h(Card, null,
+        h("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 12 } },
+          h(SLbl, { label: "✦ AI Food Log", F, color: M.clay }),
+          !ready && h("span", {
+            style: {
+              fontSize: F.x, color: M.dusty, padding: "2px 10px",
+              border: `1px solid ${M.border}`, borderRadius: 20, background: M.light,
+            },
+          }, lang === "zh" ? "後端未設定" : "Backend not configured")
+        ),
+
+        // Meal selector
+        h("div", { style: { display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" } },
+          MKEYS.map((k, i) =>
+            h("button", {
+              key: k,
+              onClick: () => setMeal(k),
+              style: {
+                padding: "6px 16px", fontSize: F.s,
+                border: `1px solid ${meal === k ? MEAL_COLORS[i] : M.border}`,
+                borderRadius: 20,
+                background: meal === k ? MEAL_COLORS[i] : "transparent",
+                color: meal === k ? "#fff" : M.muted,
+                cursor: "pointer", fontWeight: meal === k ? 500 : 400,
+                opacity: ready ? 1 : 0.55,
+              },
+            }, MLABS[i])
+          )
+        ),
+
+        // Text input
+        h("textarea", {
+          value: inp,
+          onChange: e => setInp(e.target.value),
+          placeholder: t.aiph,
+          disabled: !ready,
+          style: {
+            width: "100%", minHeight: 72, padding: "10px 14px",
+            fontSize: F.s, border: `1px solid ${M.border}`,
+            borderRadius: 10, background: ready ? M.card : M.light,
+            color: ready ? M.text : M.muted,
+            resize: "vertical", boxSizing: "border-box",
+            marginBottom: 10, outline: "none",
+            fontFamily: "system-ui,-apple-system,sans-serif",
+            opacity: ready ? 1 : 0.65,
+          },
+        }),
+
+        // Image preview
+        img && h("div", { style: { marginBottom: 10, position: "relative", display: "inline-block" } },
+          h("img", { src: img.preview, alt: "", style: { maxHeight: 100, borderRadius: 10, border: `1px solid ${M.border}` } }),
+          h("button", {
+            onClick: () => setImg(null),
+            style: {
+              position: "absolute", top: 4, right: 4,
+              border: "none", background: "rgba(74,69,64,0.7)", color: "#fff",
+              borderRadius: "50%", width: 20, height: 20,
+              fontSize: 11, cursor: "pointer", lineHeight: "20px", padding: 0,
+            },
+          }, "×")
+        ),
+
+        // Buttons row
+        h("div", { style: { display: "flex", gap: 8 } },
+          h("button", {
+            onClick: () => fRef.current && fRef.current.click(),
+            disabled: !ready,
+            style: {
+              padding: "9px 16px", fontSize: F.s,
+              border: `1px solid ${M.border}`, borderRadius: 10,
+              background: M.light, color: M.muted,
+              cursor: ready ? "pointer" : "default",
+              opacity: ready ? 1 : 0.5,
+            },
+          }, t.upph),
+          h("input", { ref: fRef, type: "file", accept: "image/*", style: { display: "none" }, onChange: handleFile }),
+          h("button", {
+            onClick: () => analyze(selDate),
+            disabled: !ready || loading || (!inp.trim() && !img),
+            style: {
+              padding: "9px 20px", fontSize: F.s, fontWeight: 500,
+              border: `1px solid ${ready ? M.clay : M.border}`,
+              borderRadius: 10,
+              background: ready ? M.clay : M.light,
+              color: ready ? "#fff" : M.muted,
+              cursor: (ready && !loading && (inp.trim() || img)) ? "pointer" : "default",
+              opacity: (!ready || (!inp.trim() && !img && !loading)) ? 0.5 : 1,
+            },
+          }, loading ? t.analyzing : t.logbtn)
+        ),
+
+        err && h("p", { style: { fontSize: F.x, color: "#C4786A", marginTop: 8, marginBottom: 0 } }, err)
+      ),
+
+      // ── DB search card ───────────────────────────────────────────
+      h(Card, null,
+        h("div", { style: { display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" } },
+          MKEYS.map((k, i) =>
+            h("button", {
+              key: k,
+              onClick: () => setMeal(k),
+              style: {
+                padding: "6px 16px", fontSize: F.s,
+                border: `1px solid ${meal === k ? MEAL_COLORS[i] : M.border}`,
+                borderRadius: 20,
+                background: meal === k ? MEAL_COLORS[i] : "transparent",
+                color: meal === k ? "#fff" : M.muted,
+                cursor: "pointer", fontWeight: meal === k ? 500 : 400,
+              },
+            }, MLABS[i])
+          )
+        ),
+
+        h(SLbl, { label: t.searchFood, F, color: M.sage }),
+        h(Inp, { value: q, onChange: e => setQ(e.target.value), placeholder: t.sph, F, style: { marginBottom: 10 } }),
+
+        // Results list
+        res.length > 0 && !sel &&
+          h("div", {
+            style: {
+              border: `1px solid ${M.border}`, borderRadius: 10, overflow: "hidden",
+              marginBottom: 10, background: M.card,
+            },
+          },
+            res.map((f, i) =>
+              h("button", {
+                key: i,
+                onClick: () => { setSel(f); setSrv(1); setCook("raw"); setRes([]); },
+                style: {
+                  width: "100%", textAlign: "left", padding: "9px 14px",
+                  background: i % 2 === 0 ? M.light : M.card,
+                  border: "none", borderBottom: i < res.length - 1 ? `1px solid ${M.border}` : "none",
+                  cursor: "pointer", fontSize: F.s, color: M.text,
+                  display: "flex", justifyContent: "space-between", alignItems: "center",
+                },
+              },
+                h("span", null, lang === "zh" && f.z ? f.z + " / " + f.n : f.n),
+                h("span", { style: { color: M.muted, fontSize: F.x } }, f.cal + " kcal / " + f.u)
+              )
+            )
+          ),
+
+        // Selected item detail
+        sel && h("div", {
+          style: {
+            padding: "12px 14px", background: M.light, borderRadius: 10,
+            border: `1px solid ${M.border}`, marginBottom: 10,
+          },
+        },
+          h("div", { style: { fontWeight: 500, fontSize: F.m, marginBottom: 6, color: M.text } },
+            lang === "zh" && sel.z ? sel.z + " / " + sel.n : sel.n
+          ),
+
+          isRaw && h("div", { style: { marginBottom: 10 } },
+            h("div", { style: { fontSize: F.x, color: M.muted, marginBottom: 6, fontWeight: 500 } }, t.cookMethod),
+            h("div", { style: { display: "flex", flexWrap: "wrap", gap: 5 } },
+              COOKING.keys.map((k, i) =>
+                h("button", {
+                  key: k,
+                  onClick: () => setCook(k),
+                  style: {
+                    padding: "4px 10px", fontSize: F.x,
+                    border: `1px solid ${cook === k ? M.clay : M.border}`,
+                    borderRadius: 20,
+                    background: cook === k ? M.clay : "transparent",
+                    color: cook === k ? "#fff" : M.muted,
+                    cursor: "pointer", fontWeight: cook === k ? 500 : 400,
+                  },
+                }, lang === "zh" ? COOKING.zh[i] : COOKING.en[i])
+              )
+            ),
+            cook !== "raw" && h("div", { style: { fontSize: F.x, color: M.clay, marginTop: 5 } },
+              (cookAdj.cal > 0 ? "+" + cookAdj.cal : cookAdj.cal) +
+              " kcal, " +
+              (cookAdj.fat > 0 ? "+" + cookAdj.fat : cookAdj.fat) + "g fat per 100g"
+            )
+          ),
+
+          h("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 8 } },
+            h("label", { style: { fontSize: F.x, color: M.muted, whiteSpace: "nowrap" } }, t.fsrv),
+            h("input", {
+              type: "range", min: 0.25, max: 5, step: 0.25, value: srv,
+              onChange: e => setSrv(parseFloat(e.target.value)),
+              style: { flex: 1, accentColor: M.sage },
+            }),
+            h("input", {
+              type: "number", min: 0.25, max: 20, step: 0.25, value: srv,
+              onChange: e => setSrv(parseFloat(e.target.value) || 1),
+              style: {
+                width: 56, padding: "6px 8px", fontSize: F.s,
+                border: `1px solid ${M.border}`, borderRadius: 8,
+                background: M.card, color: M.text, textAlign: "center", outline: "none",
+              },
+            }),
+            h("span", { style: { fontSize: F.x, color: M.muted, whiteSpace: "nowrap" } }, sel.u)
+          ),
+
+          h("div", { style: { fontSize: F.x, color: M.sage, fontWeight: 500, marginBottom: 12 } },
+            "Total: " + Math.round(adjCal * srv) + " kcal · " +
+            Math.round(sel.p * srv) + "g P · " +
+            Math.round(sel.c * srv) + "g C · " +
+            Math.max(0, Math.round(adjFat * srv)) + "g F"
+          ),
+
+          h("div", { style: { display: "flex", gap: 8 } },
+            h("button", {
+              onClick: () => addSel(selDate),
+              style: {
+                flex: 1, padding: "9px", fontSize: F.s, fontWeight: 500,
+                border: `1px solid ${M.sage}`, borderRadius: 10,
+                background: M.sage, color: "#fff", cursor: "pointer",
+              },
+            }, t.fadd),
+            h("button", {
+              onClick: () => setSel(null),
+              style: {
+                padding: "9px 14px", fontSize: F.s,
+                border: `1px solid ${M.border}`, borderRadius: 10,
+                background: "transparent", color: M.muted, cursor: "pointer",
+              },
+            }, "×")
+          )
+        ),
+
+        res.length === 0 && q.trim() && !sel &&
+          h("p", { style: { fontSize: F.s, color: M.muted, margin: "4px 0 8px" } }, t.nores),
+
+        h("button", {
+          onClick: () => setShowM(!showM),
+          style: {
+            fontSize: F.x, border: "none", background: "none",
+            color: M.dusty, cursor: "pointer", padding: 0,
+            marginTop: 4, textDecoration: "underline",
+          },
+        }, (showM ? "▲ " : "▼ ") + t.manual),
+
+        showM && h("div", {
+          style: {
+            display: "flex", flexDirection: "column", gap: 8,
+            padding: "14px", background: M.light, borderRadius: 12,
+            marginTop: 10, border: `1px solid ${M.border}`,
+          },
+        },
+          h(Inp, { value: man.name, onChange: e => setMan({ ...man, name: e.target.value }), placeholder: t.fname, F }),
+          h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 } },
+            h(Inp, { value: man.cal,  onChange: e => setMan({ ...man, cal:  e.target.value }), placeholder: t.fcal,          type: "number", F }),
+            h(Inp, { value: man.prot, onChange: e => setMan({ ...man, prot: e.target.value }), placeholder: t.prot + " (g)", type: "number", F }),
+            h(Inp, { value: man.carb, onChange: e => setMan({ ...man, carb: e.target.value }), placeholder: t.carb + " (g)", type: "number", F }),
+            h(Inp, { value: man.fat,  onChange: e => setMan({ ...man, fat:  e.target.value }), placeholder: t.fat  + " (g)", type: "number", F })
+          ),
+          h("button", {
+            onClick: () => addMan(selDate),
+            disabled: !man.name || !man.cal,
+            style: {
+              padding: "9px", fontSize: F.s, fontWeight: 500,
+              border: `1px solid ${M.clay}`, borderRadius: 10,
+              background: M.clay, color: "#fff", cursor: "pointer",
+            },
+          }, t.fadd)
+        )
+      )
+    )
+  );
+}
+
 // ─── LogFood ──────────────────────────────────────────────────────
 // Log Food tab: DB search with cooking-method selector, servings slider,
 // and manual entry fallback.
@@ -1064,6 +1466,7 @@ function Tips({ sc, t, F, lang }) {
 function App() {
   const [lang,      setLang]      = useState("en");
   const [fs,        setFs]        = useState("sm");
+  const [auth,      setAuth]      = useState(null);   // null | "owner" | "guest"
   const [tab,       setTab]       = useState("Dashboard");
   const [showPr,    setShowPr]    = useState(false);
   const [pr,        setPr]        = useState({ name: "", sex: "male", age: "", weight: "", height: "", goal: "recomp", targetWeight: "", targetDate: "" });
@@ -1075,10 +1478,11 @@ function App() {
   const [importMsg, setImportMsg] = useState("");
   const importRef = useRef();
 
-  const t    = T[lang];
-  const F    = FSZ[fs];
-  const base = calcBase(pr, sc);
-  const TABS = ["Dashboard", "Log Food", "Schedule", "Daily Tips"];
+  const t       = T[lang];
+  const F       = FSZ[fs];
+  const base    = calcBase(pr, sc);
+  const isOwner = auth === "owner";
+  const TABS    = ["Dashboard", "Log Food", "Schedule", isOwner ? "AI Coach" : "Daily Tips"];
 
   // Load persisted state on mount
   useEffect(() => {
@@ -1154,6 +1558,19 @@ function App() {
   }
 
   if (!loaded) return h("div", { style: { padding: "2rem", color: M.muted } }, "Loading…");
+
+  // ── Passcode gate ─────────────────────────────────────────────────
+  if (!auth) return h("div", {
+    style: {
+      fontFamily: "system-ui,-apple-system,sans-serif",
+      maxWidth: 480, margin: "0 auto", padding: "1rem", fontSize: F.b,
+    },
+  },
+    h("div", { style: { display: "flex", justifyContent: "flex-end", padding: "0.5rem 0 1rem" } },
+      h(Seg, { opts: ["en", "zh"], labs: ["EN", "中"], val: lang, onChange: swLang, F })
+    ),
+    h(PcScreen, { onUnlock: () => setAuth("owner"), onGuest: () => setAuth("guest"), t, F })
+  );
 
   return h("div", {
     style: {
@@ -1245,6 +1662,12 @@ function App() {
               color: saveStatus === "saved" ? M.sage : "#C4786A",
             },
           }, saveStatus === "saved" ? "✓ Saved" : "⚠ Err"),
+          !isOwner && h("span", {
+            style: {
+              fontSize: F.x, color: M.muted, padding: "3px 10px",
+              border: `1px solid ${M.border}`, borderRadius: 20, background: M.light,
+            },
+          }, t.guest),
           h(Seg, { opts: ["sm", "md", "lg"], labs: ["S", "M", "L"], val: fs, onChange: swFs, F }),
           h(Seg, { opts: ["en", "zh"], labs: ["EN", "中"], val: lang, onChange: swLang, F }),
           h("button", {
@@ -1264,11 +1687,13 @@ function App() {
 
     // ── Page body ─────────────────────────────────────────────────
     h("div", { style: { padding: "1.25rem" } },
-      showPr                            && h(PrTab,    { pr, upPr, base, t, F, lang }),
-      !showPr && tab === "Dashboard"    && h(Dash,     { base, logs, wlog, upW, sc, t, F }),
-      !showPr && tab === "Log Food"     && h(LogFood,  { logs, upLog, base, sc, t, F, lang }),
-      !showPr && tab === "Schedule"     && h(ScTab,    { sc, upSc, base, t, F, lang }),
-      !showPr && tab === "Daily Tips"   && h(Tips,     { sc, t, F, lang })
+      showPr                            && h(PrTab,       { pr, upPr, base, t, F, lang }),
+      !showPr && tab === "Dashboard"    && h(Dash,        { base, logs, wlog, upW, sc, t, F }),
+      !showPr && tab === "Log Food"     && isOwner        && h(OwnerLogFood, { logs, upLog, base, sc, t, F, lang }),
+      !showPr && tab === "Log Food"     && !isOwner       && h(LogFood,      { logs, upLog, base, sc, t, F, lang }),
+      !showPr && tab === "Schedule"     && h(ScTab,       { sc, upSc, base, t, F, lang }),
+      !showPr && tab === "AI Coach"     && h(Tips,        { sc, t, F, lang }),
+      !showPr && tab === "Daily Tips"   && h(Tips,        { sc, t, F, lang })
     )
   );
 }
