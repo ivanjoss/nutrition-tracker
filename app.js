@@ -604,7 +604,7 @@ function OwnerLogFood({ logs, upLog, base, sc, t, F, lang }) {
         body: JSON.stringify(body),
       });
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("TIMEOUT")), 15000)
+        setTimeout(() => reject(new Error("TIMEOUT")), 60000)  // 60s — handles Render cold start
       );
 
       const r = await Promise.race([fetchPromise, timeoutPromise]);
@@ -620,7 +620,7 @@ function OwnerLogFood({ logs, upLog, base, sc, t, F, lang }) {
       setInp(""); setImg(null);
     } catch (e) {
       setErr(e.message === "TIMEOUT"
-        ? "Timed out — please try again."
+        ? "Server is waking up — please try again in a moment."
         : "Error: " + e.message);
     }
     setLoading(false);
